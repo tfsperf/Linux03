@@ -8,6 +8,7 @@
  *
  */
 
+#include <linux/clk.h>
 #include <linux/clk-provider.h>
 #include <linux/clkdev.h>
 #include <linux/clk/at91_pmc.h>
@@ -20,6 +21,8 @@
 #include <linux/wait.h>
 #include <linux/sched.h>
 #include <linux/mfd/syscon.h>
+#include <linux/module.h>
+#include <linux/platform_device.h>
 #include <linux/regmap.h>
 
 #include "pmc.h"
@@ -41,6 +44,7 @@ static inline int is_pck(int id)
 {
 	return (id >= 8) && (id <= 15);
 }
+
 static irqreturn_t clk_system_irq_handler(int irq, void *dev_id)
 {
 	struct clk_system *sys = (struct clk_system *)dev_id;
@@ -114,12 +118,11 @@ static const struct clk_ops system_ops = {
 
 static struct clk * __init
 at91_clk_register_system(struct regmap *regmap, const char *name,
-			 const char *parent_name, u8 id, int irq)
+			 const char *parent_name, u8 id)
 {
 	struct clk_system *sys;
 	struct clk *clk = NULL;
 	struct clk_init_data init;
-	int ret;
 
 	if (!parent_name || id > SYSTEM_MAX_ID)
 		return ERR_PTR(-EINVAL);
@@ -137,24 +140,10 @@ at91_clk_register_system(struct regmap *regmap, const char *name,
 	sys->id = id;
 	sys->hw.init = &init;
 	sys->regmap = regmap;
-	sys->irq = irq;
-	if (irq) {
-		init_waitqueue_head(&sys->wait);
-		irq_set_status_flags(sys->irq, IRQ_NOAUTOEN);
-		ret = request_irq(sys->irq, clk_system_irq_handler,
-				IRQF_TRIGGER_HIGH, name, sys);
-		if (ret) {
-			kfree(sys);
-			return ERR_PTR(ret);
-		}
-	}
 
 	clk = clk_register(NULL, &sys->hw);
-	if (IS_ERR(clk)) {
-		if (irq)
-			free_irq(sys->irq, sys);
+	if (IS_ERR(clk))
 		kfree(sys);
-	}
 
 	return clk;
 }
@@ -162,7 +151,6 @@ at91_clk_register_system(struct regmap *regmap, const char *name,
 static void __init of_at91rm9200_clk_sys_setup(struct device_node *np)
 {
 	int num;
-	int irq = 0;
 	u32 id;
 	struct clk *clk;
 	const char *name;
@@ -185,12 +173,9 @@ static void __init of_at91rm9200_clk_sys_setup(struct device_node *np)
 		if (of_property_read_string(np, "clock-output-names", &name))
 			name = sysclknp->name;
 
-		if (is_pck(id))
-			irq = irq_of_parse_and_map(sysclknp, 0);
-
 		parent_name = of_clk_get_parent_name(sysclknp, 0);
 
-		clk = at91_clk_register_system(regmap, name, parent_name, id, irq);
+		clk = at91_clk_register_system(regmap, name, parent_name, id);
 		if (IS_ERR(clk))
 			continue;
 
@@ -199,3 +184,53 @@ static void __init of_at91rm9200_clk_sys_setup(struct device_node *np)
 }
 CLK_OF_DECLARE(at91rm9200_clk_sys, "atmel,at91rm9200-clk-system",
 	       of_at91rm9200_clk_sys_setup);
+
+static const struct of_device_id atmel_clk_sys_dt_ids[] = {
+	{ .compatible = "atmel,at91rm9200-clk-system" },
+	{ /* sentinel */ }
+};
+
+static int __init atmel_clk_sys_probe(struct platform_device *pdev)
+{
+	struct device_node *np = pdev->dev.of_node;
+	struct device_node *sysclknp;
+
+	for_each_child_of_node(np, sysclknp) {
+		struct of_phandle_args clkspec = { .np = sysclknp};
+		struct clk_hw *hw;
+		struct clk_system *sys;
+		int err;
+
+		hw = __clk_get_hw(of_clk_get_from_provider(&clkspec));
+		if (!hw)
+			continue;
+
+		sys = to_clk_system(hw);
+		if (!is_pck(sys->id))
+			continue;
+
+		sys->irq = irq_of_parse_and_map(sysclknp, 0);
+		if (!sys->irq)
+			continue;
+
+		init_waitqueue_head(&sys->wait);
+		irq_set_status_flags(sys->irq, IRQ_NOAUTOEN);
+		err = devm_request_irq(&pdev->dev, sys->irq,
+				       clk_system_irq_handler,
+				       IRQF_TRIGGER_HIGH,
+				       __clk_get_name(hw->clk), sys);
+		if (err)
+			sys->irq = 0;
+	}
+
+	return 0;
+
+}
+
+static struct platform_driver atmel_clk_sys = {
+	.driver = {
+		.name = "atmel-clk-sys",
+		.of_match_table = atmel_clk_sys_dt_ids,
+	},
+};
+module_platform_driver_probe(atmel_clk_sys, atmel_clk_sys_probe);

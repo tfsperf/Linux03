@@ -8,6 +8,7 @@
  *
  */
 
+#include <linux/clk.h>
 #include <linux/clk-provider.h>
 #include <linux/clkdev.h>
 #include <linux/clk/at91_pmc.h>
@@ -21,6 +22,8 @@
 #include <linux/interrupt.h>
 #include <linux/irq.h>
 #include <linux/mfd/syscon.h>
+#include <linux/module.h>
+#include <linux/platform_device.h>
 #include <linux/regmap.h>
 
 #include "pmc.h"
@@ -128,9 +131,13 @@ static int clk_pll_prepare(struct clk_hw *hw)
 			 ((pll->mul & layout->mul_mask) << layout->mul_shift));
 
 	while (!clk_pll_ready(regmap, pll->id)) {
-		enable_irq(pll->irq);
-		wait_event(pll->wait,
-			   clk_pll_ready(regmap, pll->id));
+		if (pll->irq) {
+			enable_irq(pll->irq);
+			wait_event(pll->wait,
+				   clk_pll_ready(regmap, pll->id));
+		} else {
+			cpu_relax();
+		}
 	}
 
 	return 0;
@@ -320,7 +327,7 @@ static const struct clk_ops pll_ops = {
 };
 
 static struct clk * __init
-at91_clk_register_pll(struct regmap *regmap, unsigned int irq, const char *name,
+at91_clk_register_pll(struct regmap *regmap, const char *name,
 		      const char *parent_name, u8 id,
 		      const struct clk_pll_layout *layout,
 		      const struct clk_pll_characteristics *characteristics)
@@ -328,7 +335,6 @@ at91_clk_register_pll(struct regmap *regmap, unsigned int irq, const char *name,
 	struct clk_pll *pll;
 	struct clk *clk = NULL;
 	struct clk_init_data init;
-	int ret;
 	int offset = PLL_REG(id);
 	unsigned int pllr;
 
@@ -350,22 +356,12 @@ at91_clk_register_pll(struct regmap *regmap, unsigned int irq, const char *name,
 	pll->layout = layout;
 	pll->characteristics = characteristics;
 	pll->regmap = regmap;
-	pll->irq = irq;
 	regmap_read(regmap, offset, &pllr);
 	pll->div = PLL_DIV(pllr);
 	pll->mul = PLL_MUL(pllr, layout);
-	init_waitqueue_head(&pll->wait);
-	irq_set_status_flags(pll->irq, IRQ_NOAUTOEN);
-	ret = request_irq(pll->irq, clk_pll_irq_handler, IRQF_TRIGGER_HIGH,
-			  id ? "clk-pllb" : "clk-plla", pll);
-	if (ret) {
-		kfree(pll);
-		return ERR_PTR(ret);
-	}
 
 	clk = clk_register(NULL, &pll->hw);
 	if (IS_ERR(clk)) {
-		free_irq(pll->irq, pll);
 		kfree(pll);
 	}
 
@@ -499,7 +495,6 @@ of_at91_clk_pll_setup(struct device_node *np,
 		      const struct clk_pll_layout *layout)
 {
 	u32 id;
-	unsigned int irq;
 	struct clk *clk;
 	struct regmap * regmap;
 	const char *parent_name;
@@ -521,11 +516,7 @@ of_at91_clk_pll_setup(struct device_node *np,
 	if (!characteristics)
 		return;
 
-	irq = irq_of_parse_and_map(np, 0);
-	if (!irq)
-		return;
-
-	clk = at91_clk_register_pll(regmap, irq, name, parent_name, id, layout,
+	clk = at91_clk_register_pll(regmap, name, parent_name, id, layout,
 				    characteristics);
 	if (IS_ERR(clk))
 		goto out_free_characteristics;
@@ -564,3 +555,46 @@ static void __init of_sama5d3_clk_pll_setup(struct device_node *np)
 }
 CLK_OF_DECLARE(sama5d3_clk_pll, "atmel,sama5d3-clk-pll",
 	       of_sama5d3_clk_pll_setup);
+
+static const struct of_device_id atmel_clk_pll_dt_ids[] = {
+	{ .compatible = "atmel,at91rm9200-clk-pll" },
+	{ .compatible = "atmel,at91sam9g45-clk-pll" },
+	{ .compatible = "atmel,at91sam9g20-clk-pllb" },
+	{ .compatible = "atmel,sama5d3-clk-pll" },
+	{ /* sentinel */ }
+};
+
+static int __init atmel_clk_pll_probe(struct platform_device *pdev)
+{
+	struct of_phandle_args clkspec = { .np = pdev->dev.of_node};
+	struct clk_pll *pll;
+	struct clk_hw *hw;
+	int ret;
+
+	hw = __clk_get_hw(of_clk_get_from_provider(&clkspec));
+	if (!hw)
+		return -ENODEV;
+
+	pll = to_clk_pll(hw);
+	pll->irq = platform_get_irq(pdev, 0);
+	if (!pll->irq)
+		return 0;
+
+	init_waitqueue_head(&pll->wait);
+	irq_set_status_flags(pll->irq, IRQ_NOAUTOEN);
+	ret = devm_request_irq(&pdev->dev, pll->irq, clk_pll_irq_handler,
+			       IRQF_TRIGGER_HIGH, __clk_get_name(hw->clk), pll);
+	if (ret)
+		pll->irq = 0;
+
+	return ret;
+
+}
+
+static struct platform_driver atmel_clk_pll = {
+	.driver = {
+		.name = "atmel-clk-pll",
+		.of_match_table = atmel_clk_pll_dt_ids,
+	},
+};
+module_platform_driver_probe(atmel_clk_pll, atmel_clk_pll_probe);

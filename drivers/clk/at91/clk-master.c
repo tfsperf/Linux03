@@ -8,12 +8,15 @@
  *
  */
 
+#include <linux/clk.h>
 #include <linux/clk-provider.h>
 #include <linux/clkdev.h>
 #include <linux/clk/at91_pmc.h>
 #include <linux/of.h>
 #include <linux/of_address.h>
 #include <linux/of_irq.h>
+#include <linux/module.h>
+#include <linux/platform_device.h>
 #include <linux/io.h>
 #include <linux/wait.h>
 #include <linux/sched.h>
@@ -77,9 +80,13 @@ static int clk_master_prepare(struct clk_hw *hw)
 	struct clk_master *master = to_clk_master(hw);
 
 	while (!clk_master_ready(master->regmap)) {
-		enable_irq(master->irq);
-		wait_event(master->wait,
-			   clk_master_ready(master->regmap));
+		if (master->irq) {
+			enable_irq(master->irq);
+			wait_event(master->wait,
+				   clk_master_ready(master->regmap));
+		} else {
+			cpu_relax();
+		}
 	}
 
 	return 0;
@@ -143,13 +150,12 @@ static const struct clk_ops master_ops = {
 };
 
 static struct clk * __init
-at91_clk_register_master(struct regmap *regmap, unsigned int irq,
+at91_clk_register_master(struct regmap *regmap,
 		const char *name, int num_parents,
 		const char **parent_names,
 		const struct clk_master_layout *layout,
 		const struct clk_master_characteristics *characteristics)
 {
-	int ret;
 	struct clk_master *master;
 	struct clk *clk = NULL;
 	struct clk_init_data init;
@@ -171,19 +177,9 @@ at91_clk_register_master(struct regmap *regmap, unsigned int irq,
 	master->layout = layout;
 	master->characteristics = characteristics;
 	master->regmap = regmap;
-	master->irq = irq;
-	init_waitqueue_head(&master->wait);
-	irq_set_status_flags(master->irq, IRQ_NOAUTOEN);
-	ret = request_irq(master->irq, clk_master_irq_handler,
-			  IRQF_TRIGGER_HIGH, "clk-master", master);
-	if (ret) {
-		kfree(master);
-		return ERR_PTR(ret);
-	}
 
 	clk = clk_register(NULL, &master->hw);
 	if (IS_ERR(clk)) {
-		free_irq(master->irq, master);
 		kfree(master);
 	}
 
@@ -233,7 +229,6 @@ of_at91_clk_master_setup(struct device_node *np,
 {
 	struct clk *clk;
 	int num_parents;
-	unsigned int irq;
 	const char *parent_names[MASTER_SOURCE_MAX];
 	const char *name = np->name;
 	struct clk_master_characteristics *characteristics;
@@ -255,11 +250,7 @@ of_at91_clk_master_setup(struct device_node *np,
 	if (IS_ERR(regmap))
 		return;
 
-	irq = irq_of_parse_and_map(np, 0);
-	if (!irq)
-		goto out_free_characteristics;
-
-	clk = at91_clk_register_master(regmap, irq, name, num_parents,
+	clk = at91_clk_register_master(regmap, name, num_parents,
 				       parent_names, layout,
 				       characteristics);
 	if (IS_ERR(clk))
@@ -285,3 +276,45 @@ static void __init of_at91sam9x5_clk_master_setup(struct device_node *np)
 }
 CLK_OF_DECLARE(at91sam9x5_clk_master, "atmel,at91sam9x5-clk-master",
 	       of_at91sam9x5_clk_master_setup);
+
+static const struct of_device_id atmel_clk_master_dt_ids[] = {
+	{ .compatible = "atmel,at91rm9200-clk-master" },
+	{ .compatible = "atmel,at91sam9x5-clk-master" },
+	{ /* sentinel */ }
+};
+
+static int __init atmel_clk_master_probe(struct platform_device *pdev)
+{
+	struct of_phandle_args clkspec = { .np = pdev->dev.of_node};
+	struct clk_master *master;
+	struct clk_hw *hw;
+	int ret;
+
+	hw = __clk_get_hw(of_clk_get_from_provider(&clkspec));
+	if (!hw)
+		return -ENODEV;
+
+	master = to_clk_master(hw);
+	master->irq = platform_get_irq(pdev, 0);
+	if (!master->irq)
+		return 0;
+
+	init_waitqueue_head(&master->wait);
+	irq_set_status_flags(master->irq, IRQ_NOAUTOEN);
+	ret = devm_request_irq(&pdev->dev, master->irq, clk_master_irq_handler,
+			       IRQF_TRIGGER_HIGH, __clk_get_name(hw->clk),
+			       master);
+	if (ret)
+		master->irq = 0;
+
+	return ret;
+
+}
+
+static struct platform_driver atmel_clk_master = {
+	.driver = {
+		.name = "atmel-clk-master",
+		.of_match_table = atmel_clk_master_dt_ids,
+	},
+};
+module_platform_driver_probe(atmel_clk_master, atmel_clk_master_probe);

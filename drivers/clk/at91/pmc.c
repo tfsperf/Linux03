@@ -20,6 +20,9 @@
 #include <linux/irqdomain.h>
 #include <linux/of_irq.h>
 #include <linux/mfd/syscon.h>
+#include <linux/module.h>
+#include <linux/of_platform.h>
+#include <linux/platform_device.h>
 #include <linux/regmap.h>
 
 #include <asm/proc-fns.h>
@@ -241,32 +244,29 @@ static struct at91_pmc *__init at91_pmc_init(struct device_node *np,
 	pmc->virq = virq;
 	pmc->caps = caps;
 
-	pmc->irqdomain = irq_domain_add_linear(np, 32, &pmc_irq_ops, pmc);
-	if (!pmc->irqdomain)
-		goto out_free_pmc;
-
-	regmap_write(pmc->regmap, AT91_PMC_IDR, 0xffffffff);
-	if (request_irq(pmc->virq, pmc_irq_handler,
-			IRQF_SHARED | IRQF_COND_SUSPEND, "pmc", pmc))
-		goto out_remove_irqdomain;
-
 	return pmc;
-
-out_remove_irqdomain:
-	irq_domain_remove(pmc->irqdomain);
-out_free_pmc:
-	kfree(pmc);
-
-	return NULL;
 }
 
-static void __init of_at91_pmc_setup(struct device_node *np,
-				     const struct at91_pmc_caps *caps)
+static const struct of_device_id atmel_pmc_dt_ids[] = {
+	{ .compatible = "atmel,at91rm9200-pmc", .data = &at91rm9200_caps },
+	{ .compatible = "atmel,at91sam9260-pmc", .data = &at91sam9260_caps },
+	{ .compatible = "atmel,at91sam9g45-pmc", .data = &at91sam9g45_caps },
+	{ .compatible = "atmel,at91sam9n12-pmc", .data = &at91sam9n12_caps },
+	{ .compatible = "atmel,at91sam9x5-pmc", .data = &at91sam9x5_caps },
+	{ .compatible = "atmel,sama5d3-pmc", .data = &sama5d3_caps },
+	{ /* sentinel */ },
+};
+
+static int __init atmel_pmc_probe(struct platform_device *pdev)
 {
+	const struct of_device_id *of_id;
+	const struct at91_pmc_caps *caps;
+	struct device_node *np = pdev->dev.of_node;
 	struct at91_pmc *pmc;
 	void __iomem *regbase = of_iomap(np, 0);
 	struct regmap *regmap;
 	int virq;
+	int ret = 0;
 
 	regmap = syscon_node_to_regmap(np);
 	if (IS_ERR(regmap))
@@ -274,51 +274,35 @@ static void __init of_at91_pmc_setup(struct device_node *np,
 
 	virq = irq_of_parse_and_map(np, 0);
 	if (!virq)
-		return;
+		return 0;
+
+	of_id = of_match_device(atmel_pmc_dt_ids, &pdev->dev);
+	caps = of_id->data;
 
 	pmc = at91_pmc_init(np, regmap, regbase, virq, caps);
 	if (!pmc)
-		return;
+		return 0;
+
+	pmc->irqdomain = irq_domain_add_linear(pdev->dev.of_node, 32,
+					       &pmc_irq_ops, pmc);
+	if (!pmc->irqdomain)
+		return 0;
+
+	regmap_write(pmc->regmap, AT91_PMC_IDR, 0xffffffff);
+	ret = request_irq(pmc->virq, pmc_irq_handler,
+			  IRQF_SHARED | IRQF_COND_SUSPEND, "pmc", pmc);
+	if (ret)
+		return ret;
+
+	of_platform_populate(pdev->dev.of_node, NULL, NULL, &pdev->dev);
+
+	return 0;
 }
 
-static void __init of_at91rm9200_pmc_setup(struct device_node *np)
-{
-	of_at91_pmc_setup(np, &at91rm9200_caps);
-}
-CLK_OF_DECLARE(at91rm9200_clk_pmc, "atmel,at91rm9200-pmc",
-	       of_at91rm9200_pmc_setup);
-
-static void __init of_at91sam9260_pmc_setup(struct device_node *np)
-{
-	of_at91_pmc_setup(np, &at91sam9260_caps);
-}
-CLK_OF_DECLARE(at91sam9260_clk_pmc, "atmel,at91sam9260-pmc",
-	       of_at91sam9260_pmc_setup);
-
-static void __init of_at91sam9g45_pmc_setup(struct device_node *np)
-{
-	of_at91_pmc_setup(np, &at91sam9g45_caps);
-}
-CLK_OF_DECLARE(at91sam9g45_clk_pmc, "atmel,at91sam9g45-pmc",
-	       of_at91sam9g45_pmc_setup);
-
-static void __init of_at91sam9n12_pmc_setup(struct device_node *np)
-{
-	of_at91_pmc_setup(np, &at91sam9n12_caps);
-}
-CLK_OF_DECLARE(at91sam9n12_clk_pmc, "atmel,at91sam9n12-pmc",
-	       of_at91sam9n12_pmc_setup);
-
-static void __init of_at91sam9x5_pmc_setup(struct device_node *np)
-{
-	of_at91_pmc_setup(np, &at91sam9x5_caps);
-}
-CLK_OF_DECLARE(at91sam9x5_clk_pmc, "atmel,at91sam9x5-pmc",
-	       of_at91sam9x5_pmc_setup);
-
-static void __init of_sama5d3_pmc_setup(struct device_node *np)
-{
-	of_at91_pmc_setup(np, &sama5d3_caps);
-}
-CLK_OF_DECLARE(sama5d3_clk_pmc, "atmel,sama5d3-pmc",
-	       of_sama5d3_pmc_setup);
+static struct platform_driver atmel_pmc = {
+	.driver = {
+		.name = "atmel-pmc",
+		.of_match_table = atmel_pmc_dt_ids,
+	},
+};
+module_platform_driver_probe(atmel_pmc, atmel_pmc_probe);
