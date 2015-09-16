@@ -288,7 +288,7 @@ static int __init atmel_pmc_probe(struct platform_device *pdev)
 	if (!pmc->irqdomain)
 		return 0;
 
-	regmap_write(pmc->regmap, AT91_PMC_IDR, 0xffffffff);
+	regmap_write(pmc->regmap, AT91_PMC_IDR, pmc->caps->available_irqs);
 	ret = request_irq(pmc->virq, pmc_irq_handler,
 			  IRQF_SHARED | IRQF_COND_SUSPEND, "pmc", pmc);
 	if (ret)
