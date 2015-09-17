@@ -29,6 +29,18 @@
 
 #include "pmc.h"
 
+struct at91_pmc_caps {
+	u32 available_irqs;
+};
+
+struct at91_pmc {
+	struct regmap *regmap;
+	int virq;
+	const struct at91_pmc_caps *caps;
+	struct irq_domain *irqdomain;
+	u32 imr;
+};
+
 void __iomem *at91_pmc_base;
 EXPORT_SYMBOL_GPL(at91_pmc_base);
 

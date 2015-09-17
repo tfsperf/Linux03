@@ -24,18 +24,6 @@ struct clk_range {
 
 #define CLK_RANGE(MIN, MAX) {.min = MIN, .max = MAX,}
 
-struct at91_pmc_caps {
-	u32 available_irqs;
-};
-
-struct at91_pmc {
-	struct regmap *regmap;
-	int virq;
-	const struct at91_pmc_caps *caps;
-	struct irq_domain *irqdomain;
-	u32 imr;
-};
-
 int of_at91_get_clk_range(struct device_node *np, const char *propname,
 			  struct clk_range *range);
 
